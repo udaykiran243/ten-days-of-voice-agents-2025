@@ -6,9 +6,13 @@ import { SessionProvider } from '@/components/app/session-provider';
 import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/livekit/toaster';
 
+import { useDataChannel } from "@livekit/components-react";
+import { useState, useEffect } from "react";
+
 interface AppProps {
   appConfig: AppConfig;
 }
+
 
 export function App({ appConfig }: AppProps) {
   return (

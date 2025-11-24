@@ -1,0 +1,11 @@
+[
+  {
+    "timestamp": "2025-11-24 13:50:00",
+    "mood_text": "good",
+    "mood_score": 8,
+    "goals": [
+      "complete the Day 3 of AI voice agent"
+    ],
+    "summary": "The user is feeling good (8/10) and their main goal is to complete the Day 3 of the AI voice agent. The task has been added to their task list."
+  }
+]
