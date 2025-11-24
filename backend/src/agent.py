@@ -1,8 +1,7 @@
 import logging
 import json
 import os
-from datetime import datetime
-from typing import Annotated, List
+from typing import Annotated, Optional, Literal
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -10,261 +9,147 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
-    RoomInputOptions,
     WorkerOptions,
     cli,
+    llm,
     tokenize,
     function_tool,
     RunContext
 )
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
-
-logger = logging.getLogger("agent")
+from livekit.plugins import murf, deepgram, google, silero
 
 load_dotenv(".env.local")
+logger = logging.getLogger("tutor-agent")
 
-# --- CONFIGURATION: ROBUST PATHS ---
-# Get the actual folder where this script (agent.py) is located
+# --- 1. Load Content ---
+CONTENT_FILE = "day4_tutor_content.json"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Create the data folder specifically inside that directory
-DATA_FOLDER = os.path.join(SCRIPT_DIR, "data")
-os.makedirs(DATA_FOLDER, exist_ok=True)
+FULL_PATH = os.path.join(SCRIPT_DIR, CONTENT_FILE)
 
-logger.info(f"Saving data to: {DATA_FOLDER}")
+COURSE_CONTENT = []
+if os.path.exists(FULL_PATH):
+    with open(FULL_PATH, "r") as f:
+        COURSE_CONTENT = json.load(f)
+else:
+    logger.warning(f"Content file not found at {FULL_PATH}.")
 
-# --- 1. Wellness Journal (Memory & Analytics) ---
-class WellnessJournal:
-    def __init__(self, filename="wellness_log.json"):
-        self.filepath = os.path.join(DATA_FOLDER, filename)
-        self._ensure_file_healthy()
-
-    def _ensure_file_healthy(self):
-        """Creates file if missing, or resets it if corrupt/empty."""
-        should_reset = False
-        
-        if not os.path.exists(self.filepath):
-            should_reset = True
-        elif os.path.getsize(self.filepath) == 0:
-            should_reset = True
-        else:
-            # Validate JSON content
-            try:
-                with open(self.filepath, "r") as f:
-                    json.load(f)
-            except (json.JSONDecodeError, Exception):
-                logger.warning(f"Corrupt journal found at {self.filepath}. Resetting.")
-                should_reset = True
-
-        if should_reset:
-            with open(self.filepath, "w") as f:
-                json.dump([], f)
-
-    def get_last_entry(self):
-        """Retrieves the most recent check-in for context."""
-        try:
-            with open(self.filepath, "r") as f:
-                data = json.load(f)
-                if data and isinstance(data, list) and len(data) > 0:
-                    return data[-1]
-        except Exception as e:
-            logger.error(f"Error reading journal: {e}")
-            # Attempt to auto-heal if read fails
-            self._ensure_file_healthy()
-            return None
-        return None
-
-    def log_entry(self, mood_text: str, mood_score: int, goals: List[str], summary: str):
-        """Appends a new entry to the log."""
-        entry = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "mood_text": mood_text,
-            "mood_score": mood_score,
-            "goals": goals,
-            "summary": summary
-        }
-        
-        # Safer Read-Modify-Write pattern
-        try:
-            with open(self.filepath, "r") as f:
-                data = json.load(f)
-                if not isinstance(data, list): data = []
-        except (FileNotFoundError, json.JSONDecodeError):
-            data = []
-
-        data.append(entry)
-
-        with open(self.filepath, "w") as f:
-            json.dump(data, f, indent=2)
-        
-        return entry
-
-    def get_weekly_stats(self):
-        """Advanced Goal 2: Weekly Reflection Logic"""
-        try:
-            with open(self.filepath, "r") as f:
-                data = json.load(f)
-            
-            if not data:
-                return "No records found."
-
-            recent_entries = data[-7:]
-            scores = [e.get('mood_score', 5) for e in recent_entries]
-            avg_score = sum(scores) / len(scores) if scores else 0
-            total_goals = sum(len(e.get('goals', [])) for e in recent_entries)
-            
-            return {
-                "entries_count": len(recent_entries),
-                "average_mood_score": round(avg_score, 1),
-                "total_goals_set": total_goals,
-                "mood_trend": "Improving" if len(scores) > 1 and scores[-1] >= scores[0] else "Fluctuating"
-            }
-        except Exception as e:
-            return f"Error calculating stats: {str(e)}"
-
-# --- 2. Task Manager (Advanced Goal 1) ---
-class TaskJournal:
-    def __init__(self, filename="tasks.json"):
-        self.filepath = os.path.join(DATA_FOLDER, filename)
-        self._ensure_file_healthy()
-
-    def _ensure_file_healthy(self):
-        should_reset = False
-        if not os.path.exists(self.filepath) or os.path.getsize(self.filepath) == 0:
-            should_reset = True
-        else:
-            try:
-                with open(self.filepath, "r") as f:
-                    json.load(f)
-            except json.JSONDecodeError:
-                should_reset = True
-        
-        if should_reset:
-            with open(self.filepath, "w") as f:
-                json.dump([], f)
-
-    def add_task(self, task_desc: str, due_date: str = "Today"):
-        new_task = {
-            "task": task_desc,
-            "due": due_date,
-            "status": "Pending",
-            "created_at": datetime.now().strftime("%Y-%m-%d")
-        }
-        
-        try:
-            with open(self.filepath, "r") as f:
-                data = json.load(f)
-                if not isinstance(data, list): data = []
-        except (FileNotFoundError, json.JSONDecodeError):
-            data = []
-
-        data.append(new_task)
-
-        with open(self.filepath, "w") as f:
-            json.dump(data, f, indent=2)
-            
-        return new_task
-
-# --- 3. The Advanced Wellness Agent ---
-class WellnessCompanion(Agent):
-    def __init__(self, context_str: str) -> None:
+# --- 2. The Tutor Agent ---
+class TutorAgent(Agent):
+    def __init__(self, session: AgentSession):
         super().__init__(
-            instructions=f"""
-            You are a supportive Health & Wellness Voice Companion.
+            instructions="""
+            You are the 'Active Recall Coach'. 
+            Your goal is to welcome the user and ask them what topic they want to study today.
             
-            CONTEXT FROM HISTORY:
-            {context_str}
+            AVAILABLE TOPICS: Variables, Loops, Functions.
             
-            YOUR CAPABILITIES:
-            1. Daily Check-in: Ask about Mood (Text AND Score 1-10) and Goals.
-            2. Task Management: If the user mentions a specific task (e.g., "I need to email my boss"), OFFER to save it to their task list.
-            3. Weekly Reflection: If the user asks "How has my week been?", use the `get_weekly_insights` tool.
-
-            FLOW:
-            - Greet & Check Context.
-            - Ask: "How are you feeling 1-10?" and "What is your main goal?"
-            - If they mention a task -> Ask "Should I add that to your task list?" -> Call `create_task`.
-            - Recap & Save: Call `save_checkin` at the end.
+            Once they pick a topic, ask if they want to start with:
+            1. LEARN Mode (I explain it)
+            2. QUIZ Mode (I test you)
+            3. TEACH-BACK Mode (You explain it to me)
+            
+            Use the `set_study_mode` tool immediately once they decide.
             """,
         )
-        self.wellness_journal = WellnessJournal()
-        self.task_journal = TaskJournal()
+        self.agent_session = session
+        self.current_topic_id = None
 
     @function_tool
-    async def save_checkin(
-        self, 
-        ctx: RunContext, 
-        mood_text: Annotated[str, "User's verbal description of mood"],
-        mood_score: Annotated[int, "User's mood score from 1-10"],
-        goals: Annotated[List[str], "List of goals for the day"],
-        summary: Annotated[str, "Brief summary of the chat"]
-    ):
-        """Save the daily check-in data."""
-        entry = self.wellness_journal.log_entry(mood_text, mood_score, goals, summary)
-        return f"Saved check-in. Mood: {mood_score}/10."
-
-    @function_tool
-    async def create_task(
+    async def set_study_mode(
         self,
         ctx: RunContext,
-        task_description: Annotated[str, "The specific task to do"],
-        due_when: Annotated[str, "When it should be done (e.g. 'Today', 'Tomorrow')"] = "Today"
+        mode: Annotated[Literal["learn", "quiz", "teach_back"], "The mode to switch to"],
+        topic_name: Annotated[Optional[str], "The topic to study"] = None
     ):
-        """Add a specific item to the user's Todo list file."""
-        try:
-            task = self.task_journal.add_task(task_description, due_when)
-            return f"Task created: '{task_description}' for {due_when}."
-        except Exception as e:
-            return f"Failed to create task: {e}"
+        """Switch the learning mode and/or topic. This changes the agent's personality and voice."""
+        
+        # 1. Resolve Topic
+        if topic_name:
+            found = next((t for t in COURSE_CONTENT if t["title"].lower() in topic_name.lower()), None)
+            if found: self.current_topic_id = found["id"]
+        
+        # Get Topic Data
+        topic_data = next((t for t in COURSE_CONTENT if t["id"] == self.current_topic_id), None)
+        if not topic_data:
+            return "Please select a valid topic first (Variables, Loops, Functions)."
 
-    @function_tool
-    async def get_weekly_insights(self, ctx: RunContext):
-        """Call this if the user asks for a summary of their week or mood trends."""
-        stats = self.wellness_journal.get_weekly_stats()
-        return f"Weekly Stats: {stats}"
+        # 2. Configure Voice & Persona based on Mode
+        voice_id = "en-US-matthew" # Default
+        new_instructions = ""
+
+        if mode == "learn":
+            voice_id = "en-US-matthew" # Tutor
+            new_instructions = f"""
+            Your New Role: Tutor (Voice: Matthew).
+            MODE: LEARN
+            TOPIC: {topic_data['title']}
+            CONTENT: {topic_data['summary']}
+            GOAL: Explain the concept clearly using the content above. Be concise. Then ask if they are ready for a Quiz.
+            """
+        elif mode == "quiz":
+            voice_id = "en-US-alicia" # Quiz Master
+            new_instructions = f"""
+            Your New Role: Quiz Master (Voice: Alicia).
+            MODE: QUIZ
+            TOPIC: {topic_data['title']}
+            SAMPLE QUESTION: {topic_data['sample_question']}
+            GOAL: Ask the sample question. If they answer correctly, ask a harder follow-up. If wrong, give a hint.
+            """
+        elif mode == "teach_back":
+            voice_id = "en-US-ken" # Evaluator
+            new_instructions = f"""
+            Your New Role: Evaluator (Voice: Ken).
+            MODE: TEACH-BACK
+            TOPIC: {topic_data['title']}
+            REFERENCE: {topic_data['summary']}
+            GOAL: Ask the user to teach YOU. Listen, then give a score (0-100) based on accuracy compared to the reference.
+            """
+
+        # 3. Apply Changes
+        
+        # Update Voice (Hot-Swap)
+        logger.info(f"Switching voice to {voice_id}")
+        self.agent_session.tts = murf.TTS(
+            voice=voice_id,
+            style="Conversation",
+            text_pacing=True
+        )
+
+        # Return the new instructions as the tool output. 
+        # The LLM will see this immediately and adopt the new persona.
+        return f"""
+        SYSTEM UPDATE: 
+        - Voice switched to {voice_id}.
+        - Mode switched to {mode.upper()}.
+        
+        INSTRUCTIONS FOR NEXT RESPONSE:
+        {new_instructions}
+        
+        (Start speaking as the new persona now.)
+        """
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
+    await ctx.connect()
 
-    # Load Context
-    journal = WellnessJournal()
-    last = journal.get_last_entry()
-    
-    history_context = "No previous history."
-    if last:
-        history_context = (
-            f"Last Session: {last.get('timestamp')}\n"
-            f"Last Mood: {last.get('mood_score')}/10 ({last.get('mood_text')})\n"
-            f"Last Goals: {', '.join(last.get('goals', []))}"
-        )
-
+    # Initialize Session with Default Voice (Matthew)
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(
-            voice="en-US-matthew", 
-            style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True
-        ),
-        turn_detection=MultilingualModel(),
+        tts=murf.TTS(voice="en-US-matthew", style="Conversation", text_pacing=True),
         vad=ctx.proc.userdata["vad"],
     )
 
-    agent = WellnessCompanion(context_str=history_context)
+    # Initialize Agent
+    agent = TutorAgent(session=session)
 
     await session.start(
         agent=agent,
-        room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
+        room=ctx.room
     )
-
-    await ctx.connect()
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))

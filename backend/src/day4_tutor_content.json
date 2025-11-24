@@ -1,0 +1,20 @@
+[
+  {
+    "id": "variables",
+    "title": "Variables",
+    "summary": "In programming, a variable is like a container or a labeled box. It stores data values (like numbers or text) so you can refer to them and manipulate them later in your code. Without variables, we would have to hard-code every single value.",
+    "sample_question": "Imagine you are building a game. Why would you use a variable for the 'Score' instead of just writing the number 0?"
+  },
+  {
+    "id": "loops",
+    "title": "Loops",
+    "summary": "Loops allow code to be repeated multiple times without writing the same lines over and over. A 'For Loop' is used when you know how many times to repeat (like 10 times). A 'While Loop' repeats as long as a certain condition is true (like while the player is still alive).",
+    "sample_question": "If I want to print 'Hello' 100 times, which type of loop is best and why?"
+  },
+  {
+    "id": "functions",
+    "title": "Functions",
+    "summary": "A function is a block of code designed to perform a particular task. You 'call' the function whenever you need that task done. It helps keep code organized and reusable, so you don't repeat yourself (DRY principle).",
+    "sample_question": "What is the main benefit of wrapping a complex calculation inside a function?"
+  }
+]
