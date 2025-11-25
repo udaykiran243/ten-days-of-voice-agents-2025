@@ -1,0 +1,37 @@
+{
+  "company": "Razorpay",
+  "description": "Razorpay is India's leading full-stack financial solutions company. We help businesses accept payments, make payouts, and manage their finances.",
+  "products": [
+    {
+      "name": "Payment Gateway",
+      "details": "Accept domestic and international payments with 100+ payment modes including UPI, Cards, Netbanking, and Wallets."
+    },
+    {
+      "name": "Payment Links",
+      "details": "Share payment links via SMS, Email, or WhatsApp and get paid immediately without a website."
+    },
+    {
+      "name": "RazorpayX",
+      "details": "A neobanking platform to supercharge your business banking. Automate payroll, pay vendors, and manage corporate cards."
+    }
+  ],
+  "pricing": {
+    "standard": "2% per transaction for Indian Debit/Credit cards, Netbanking, and UPI.",
+    "international": "3% per transaction for International cards.",
+    "enterprise": "Custom pricing available for large volumes. Requires contacting the sales team."
+  },
+  "faq": [
+    {
+      "question": "Is there a setup fee?",
+      "answer": "No, there is zero setup fee and zero annual maintenance fee for the standard plan."
+    },
+    {
+      "question": "How long does settlement take?",
+      "answer": "Standard settlement cycle is T+2 days (2 working days after the transaction)."
+    },
+    {
+      "question": "Do you support subscriptions?",
+      "answer": "Yes, Razorpay Subscriptions allows you to automate recurring payments via UPI, Cards, and eMandate."
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 import logging
 import json
 import os
-from typing import Annotated, Optional, Literal
+from datetime import datetime
+from typing import Annotated, Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -11,158 +12,116 @@ from livekit.agents import (
     JobProcess,
     WorkerOptions,
     cli,
-    llm,
     function_tool,
     RunContext
 )
-from livekit.agents import tts as lk_tts
 from livekit.plugins import murf, deepgram, google, silero
 
 load_dotenv(".env.local")
-logger = logging.getLogger("tutor-agent")
+logger = logging.getLogger("sdr-agent")
 
-# --- 1. Load Content ---
-CONTENT_FILE = "day4_tutor_content.json"
+# --- 1. Paths ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FULL_PATH = os.path.join(SCRIPT_DIR, CONTENT_FILE)
+DATA_FILE = os.path.join(SCRIPT_DIR, "company_data.json")
+LEADS_DIR = os.path.join(SCRIPT_DIR, "leads")
+os.makedirs(LEADS_DIR, exist_ok=True)
 
-COURSE_CONTENT = []
-if os.path.exists(FULL_PATH):
-    with open(FULL_PATH, "r") as f:
-        COURSE_CONTENT = json.load(f)
-else:
-    logger.warning(f"Content file not found at {FULL_PATH}.")
-
-# --- 2. Dynamic Voice Wrapper ---
-class DynamicMurfTTS(lk_tts.TTS):
-    def __init__(self, initial_voice="en-US-matthew"):
-        super().__init__(
-            capabilities=lk_tts.TTSCapabilities(streaming=True), 
-            sample_rate=44100, 
-            num_channels=1
-        )
-        self._current_engine = murf.TTS(voice=initial_voice, style="Conversation", text_pacing=True)
-
-    def set_voice(self, voice_id: str):
-        if self._current_engine._opts.voice != voice_id:
-            logger.info(f"DynamicMurfTTS switching to: {voice_id}")
-            self._current_engine = murf.TTS(voice=voice_id, style="Conversation", text_pacing=True)
-
-    def synthesize(self, text: str):
-        return self._current_engine.synthesize(text)
-
-    def stream(self, **kwargs): 
-        return self._current_engine.stream(**kwargs)
-
-# --- 3. Configuration Helper ---
-def get_mode_config(mode: str, topic_id: str):
-    topic_data = next((t for t in COURSE_CONTENT if t["id"] == topic_id), None)
-    topic_title = topic_data["title"] if topic_data else "General"
+# --- 2. Lead Management ---
+class LeadForm:
+    def __init__(self):
+        self.data = {
+            "name": None, "company": None, "role": None,
+            "use_case": None, "team_size": None,
+            "timeline": None, "email": None
+        }
     
-    if mode == "learn":
-        return {
-            "voice": "en-US-matthew",
-            "instructions": f"""
-                *** SYSTEM UPDATE: You are now the TUTOR (Voice: Matthew). ***
-                
-                MODE: LEARN
-                TOPIC: {topic_title}
-                CONTENT: {topic_data['summary'] if topic_data else 'No content found.'}
-                
-                INSTRUCTIONS: Explain the concept clearly using the content above. Be concise. 
-                After explaining, ask: "Ready for a Quiz?"
-            """
-        }
-    elif mode == "quiz":
-        return {
-            "voice": "en-US-alicia",
-            "instructions": f"""
-                *** SYSTEM UPDATE: You are now the QUIZ MASTER (Voice: Alicia). ***
-                
-                MODE: QUIZ
-                TOPIC: {topic_title}
-                SAMPLE QUESTION: {topic_data['sample_question'] if topic_data else 'No question found.'}
-                
-                INSTRUCTIONS: Ask the sample question immediately.
-                - If they answer correctly, congratulate them energetically.
-                - If wrong, give a gentle hint.
-                After 2 questions, suggest TEACH-BACK Mode.
-            """
-        }
-    elif mode == "teach_back":
-        return {
-            "voice": "en-US-ken",
-            "instructions": f"""
-                *** SYSTEM UPDATE: You are now the EVALUATOR (Voice: Ken). ***
-                
-                MODE: TEACH-BACK
-                TOPIC: {topic_title}
-                REFERENCE SUMMARY: {topic_data['summary'] if topic_data else ''}
-                
-                INSTRUCTIONS: Say "Okay, you're the teacher now. Explain {topic_title} to me."
-                Listen, then score them (0-100) and give feedback.
-            """
-        }
-    return {"voice": "en-US-matthew", "instructions": "You are a helpful assistant."}
+    def update(self, field, value):
+        if field in self.data:
+            self.data[field] = value
+            return True
+        return False
 
-# --- 4. The Tutor Agent ---
-class TutorAgent(Agent):
-    def __init__(self, session: AgentSession):
+    def save_to_file(self):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = (self.data['name'] or "unknown").replace(" ", "_")
+        filename = f"lead_{safe_name}_{timestamp}.json"
+        filepath = os.path.join(LEADS_DIR, filename)
+        with open(filepath, "w") as f:
+            json.dump(self.data, f, indent=2)
+        return filename
+
+# --- 3. The Agent ---
+class SDRAgent(Agent):
+    def __init__(self, company_data):
         super().__init__(
-            instructions="""
-            You are the 'Active Recall Coach'. 
-            Your goal is to welcome the user and ask them what topic they want to study today.
+            instructions=f"""
+            You are Rohan, an SDR for **Razorpay**.
+            GOAL: Qualify the lead (Name, Company, Role, Use Case, Team Size, Timeline) and answer questions.
             
-            AVAILABLE TOPICS: Variables, Loops, Functions.
+            - Use `lookup_info` for Pricing/Products.
+            - Use `update_lead` to save details.
+            - Use `finalize_call` when the user is done.
             
-            Once they pick a topic, ask if they want to start with:
-            1. LEARN Mode
-            2. QUIZ Mode
-            3. TEACH-BACK Mode
-            
-            Use the `set_study_mode` tool immediately once they decide.
-            IMPORTANT: Do not say "I cannot change my voice". The `set_study_mode` tool WILL change your voice automatically.
-            """,
+            If asked about pricing/charges, ALWAYS check the tool first.
+            """
         )
-        self.agent_session = session
-        self.current_topic_id = None
+        self.lead_form = LeadForm()
+        self.company_data = company_data
 
     @function_tool
-    async def set_study_mode(
-        self,
-        ctx: RunContext,
-        mode: Annotated[Literal["learn", "quiz", "teach_back"], "The mode to switch to"],
-        topic_name: Annotated[Optional[str], "The topic to study"] = None
+    async def lookup_info(
+        self, 
+        ctx: RunContext, 
+        query: Annotated[str, "Topic (pricing, products, etc)"]
     ):
-        """Switch learning mode/topic. Triggers voice change and persona update."""
+        """Search knowledge base for answers."""
+        q = query.lower()
+        logger.info(f"Searching for: {q}")
+        results = []
         
-        # 1. Update State
-        if topic_name:
-            found = next((t for t in COURSE_CONTENT if t["title"].lower() in topic_name.lower()), None)
-            if found: self.current_topic_id = found["id"]
+        # Pricing Keywords
+        if any(k in q for k in ["price", "cost", "fee", "charge", "rate", "commission"]):
+            results.append(f"Pricing: {json.dumps(self.company_data.get('pricing', 'N/A'))}")
+            
+        # Products
+        for prod in self.company_data.get('products', []):
+            if prod['name'].lower() in q or q in prod['name'].lower():
+                results.append(f"Product {prod['name']}: {prod['details']}")
+                
+        # FAQs
+        for item in self.company_data.get('faq', []):
+            if q in item['question'].lower() or item['question'].lower() in q:
+                results.append(f"Q: {item['question']} A: {item['answer']}")
         
-        if not self.current_topic_id:
-            return "Please ask the user to select a valid topic first."
+        if not results:
+            return f"No exact match for '{q}'. General Info: {self.company_data.get('description')}"
+            
+        return "\n".join(results)
 
-        # 2. Get Config
-        config = get_mode_config(mode, self.current_topic_id)
+    @function_tool
+    async def update_lead(
+        self, ctx: RunContext,
+        name: Optional[str] = None, company: Optional[str] = None,
+        role: Optional[str] = None, use_case: Optional[str] = None,
+        team_size: Optional[str] = None, timeline: Optional[str] = None,
+        email: Optional[str] = None
+    ):
+        """Save lead details."""
+        updates = []
+        for field, val in locals().items():
+            if field in ["self", "ctx", "updates"] or val is None: continue
+            if self.lead_form.update(field, val):
+                updates.append(field)
         
-        # 3. EXECUTE THE VOICE SWITCH (Directly on the wrapper)
-        if isinstance(self.agent_session.tts, DynamicMurfTTS):
-            logger.info(f"Tool executing voice switch to {config['voice']}")
-            self.agent_session.tts.set_voice(config['voice'])
-        
-        # 4. Return New Persona Instructions
-        return f"""
-        SUCCESS: Voice switched to {config['voice']}.
-        
-        {config['instructions']}
-        
-        (Adopt this new persona immediately.)
-        """
+        return f"Updated: {', '.join(updates)}"
 
-# --- 5. Entrypoint ---
+    @function_tool
+    async def finalize_call(self, ctx: RunContext):
+        """Save data and end call."""
+        fname = self.lead_form.save_to_file()
+        return f"Lead saved to {fname}. Say goodbye."
 
+# --- 4. Entrypoint ---
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
@@ -170,20 +129,24 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
     await ctx.connect()
 
-    # Initialize Session with Dynamic TTS
-    dynamic_tts = DynamicMurfTTS(initial_voice="en-US-matthew")
+    # Load data safely inside entrypoint
+    data = {}
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+    else:
+        logger.error("DATA FILE MISSING")
 
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=dynamic_tts, 
+        tts=murf.TTS(voice="en-US-matthew", style="Promo", text_pacing=True),
         vad=ctx.proc.userdata["vad"],
     )
 
-    # Pass session to agent so tools can access TTS
-    agent = TutorAgent(session=session)
-
+    agent = SDRAgent(company_data=data)
     await session.start(agent=agent, room=ctx.room)
+    await agent.say("Hi! I'm Rohan from Razorpay. How can I help you?", allow_interruptions=True)
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
