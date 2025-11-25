@@ -12,10 +12,10 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     llm,
-    tokenize,
     function_tool,
     RunContext
 )
+from livekit.agents import tts as lk_tts
 from livekit.plugins import murf, deepgram, google, silero
 
 load_dotenv(".env.local")
@@ -33,7 +33,79 @@ if os.path.exists(FULL_PATH):
 else:
     logger.warning(f"Content file not found at {FULL_PATH}.")
 
-# --- 2. The Tutor Agent ---
+# --- 2. Dynamic Voice Wrapper ---
+class DynamicMurfTTS(lk_tts.TTS):
+    def __init__(self, initial_voice="en-US-matthew"):
+        super().__init__(
+            capabilities=lk_tts.TTSCapabilities(streaming=True), 
+            sample_rate=44100, 
+            num_channels=1
+        )
+        self._current_engine = murf.TTS(voice=initial_voice, style="Conversation", text_pacing=True)
+
+    def set_voice(self, voice_id: str):
+        if self._current_engine._opts.voice != voice_id:
+            logger.info(f"DynamicMurfTTS switching to: {voice_id}")
+            self._current_engine = murf.TTS(voice=voice_id, style="Conversation", text_pacing=True)
+
+    def synthesize(self, text: str):
+        return self._current_engine.synthesize(text)
+
+    def stream(self, **kwargs): 
+        return self._current_engine.stream(**kwargs)
+
+# --- 3. Configuration Helper ---
+def get_mode_config(mode: str, topic_id: str):
+    topic_data = next((t for t in COURSE_CONTENT if t["id"] == topic_id), None)
+    topic_title = topic_data["title"] if topic_data else "General"
+    
+    if mode == "learn":
+        return {
+            "voice": "en-US-matthew",
+            "instructions": f"""
+                *** SYSTEM UPDATE: You are now the TUTOR (Voice: Matthew). ***
+                
+                MODE: LEARN
+                TOPIC: {topic_title}
+                CONTENT: {topic_data['summary'] if topic_data else 'No content found.'}
+                
+                INSTRUCTIONS: Explain the concept clearly using the content above. Be concise. 
+                After explaining, ask: "Ready for a Quiz?"
+            """
+        }
+    elif mode == "quiz":
+        return {
+            "voice": "en-US-alicia",
+            "instructions": f"""
+                *** SYSTEM UPDATE: You are now the QUIZ MASTER (Voice: Alicia). ***
+                
+                MODE: QUIZ
+                TOPIC: {topic_title}
+                SAMPLE QUESTION: {topic_data['sample_question'] if topic_data else 'No question found.'}
+                
+                INSTRUCTIONS: Ask the sample question immediately.
+                - If they answer correctly, congratulate them energetically.
+                - If wrong, give a gentle hint.
+                After 2 questions, suggest TEACH-BACK Mode.
+            """
+        }
+    elif mode == "teach_back":
+        return {
+            "voice": "en-US-ken",
+            "instructions": f"""
+                *** SYSTEM UPDATE: You are now the EVALUATOR (Voice: Ken). ***
+                
+                MODE: TEACH-BACK
+                TOPIC: {topic_title}
+                REFERENCE SUMMARY: {topic_data['summary'] if topic_data else ''}
+                
+                INSTRUCTIONS: Say "Okay, you're the teacher now. Explain {topic_title} to me."
+                Listen, then score them (0-100) and give feedback.
+            """
+        }
+    return {"voice": "en-US-matthew", "instructions": "You are a helpful assistant."}
+
+# --- 4. The Tutor Agent ---
 class TutorAgent(Agent):
     def __init__(self, session: AgentSession):
         super().__init__(
@@ -44,11 +116,12 @@ class TutorAgent(Agent):
             AVAILABLE TOPICS: Variables, Loops, Functions.
             
             Once they pick a topic, ask if they want to start with:
-            1. LEARN Mode (I explain it)
-            2. QUIZ Mode (I test you)
-            3. TEACH-BACK Mode (You explain it to me)
+            1. LEARN Mode
+            2. QUIZ Mode
+            3. TEACH-BACK Mode
             
             Use the `set_study_mode` tool immediately once they decide.
+            IMPORTANT: Do not say "I cannot change my voice". The `set_study_mode` tool WILL change your voice automatically.
             """,
         )
         self.agent_session = session
@@ -61,72 +134,34 @@ class TutorAgent(Agent):
         mode: Annotated[Literal["learn", "quiz", "teach_back"], "The mode to switch to"],
         topic_name: Annotated[Optional[str], "The topic to study"] = None
     ):
-        """Switch the learning mode and/or topic. This changes the agent's personality and voice."""
+        """Switch learning mode/topic. Triggers voice change and persona update."""
         
-        # 1. Resolve Topic
+        # 1. Update State
         if topic_name:
             found = next((t for t in COURSE_CONTENT if t["title"].lower() in topic_name.lower()), None)
             if found: self.current_topic_id = found["id"]
         
-        # Get Topic Data
-        topic_data = next((t for t in COURSE_CONTENT if t["id"] == self.current_topic_id), None)
-        if not topic_data:
-            return "Please select a valid topic first (Variables, Loops, Functions)."
+        if not self.current_topic_id:
+            return "Please ask the user to select a valid topic first."
 
-        # 2. Configure Voice & Persona based on Mode
-        voice_id = "en-US-matthew" # Default
-        new_instructions = ""
-
-        if mode == "learn":
-            voice_id = "en-US-matthew" # Tutor
-            new_instructions = f"""
-            Your New Role: Tutor (Voice: Matthew).
-            MODE: LEARN
-            TOPIC: {topic_data['title']}
-            CONTENT: {topic_data['summary']}
-            GOAL: Explain the concept clearly using the content above. Be concise. Then ask if they are ready for a Quiz.
-            """
-        elif mode == "quiz":
-            voice_id = "en-US-alicia" # Quiz Master
-            new_instructions = f"""
-            Your New Role: Quiz Master (Voice: Alicia).
-            MODE: QUIZ
-            TOPIC: {topic_data['title']}
-            SAMPLE QUESTION: {topic_data['sample_question']}
-            GOAL: Ask the sample question. If they answer correctly, ask a harder follow-up. If wrong, give a hint.
-            """
-        elif mode == "teach_back":
-            voice_id = "en-US-ken" # Evaluator
-            new_instructions = f"""
-            Your New Role: Evaluator (Voice: Ken).
-            MODE: TEACH-BACK
-            TOPIC: {topic_data['title']}
-            REFERENCE: {topic_data['summary']}
-            GOAL: Ask the user to teach YOU. Listen, then give a score (0-100) based on accuracy compared to the reference.
-            """
-
-        # 3. Apply Changes
+        # 2. Get Config
+        config = get_mode_config(mode, self.current_topic_id)
         
-        # Update Voice (Hot-Swap)
-        logger.info(f"Switching voice to {voice_id}")
-        self.agent_session.tts = murf.TTS(
-            voice=voice_id,
-            style="Conversation",
-            text_pacing=True
-        )
-
-        # Return the new instructions as the tool output. 
-        # The LLM will see this immediately and adopt the new persona.
+        # 3. EXECUTE THE VOICE SWITCH (Directly on the wrapper)
+        if isinstance(self.agent_session.tts, DynamicMurfTTS):
+            logger.info(f"Tool executing voice switch to {config['voice']}")
+            self.agent_session.tts.set_voice(config['voice'])
+        
+        # 4. Return New Persona Instructions
         return f"""
-        SYSTEM UPDATE: 
-        - Voice switched to {voice_id}.
-        - Mode switched to {mode.upper()}.
+        SUCCESS: Voice switched to {config['voice']}.
         
-        INSTRUCTIONS FOR NEXT RESPONSE:
-        {new_instructions}
+        {config['instructions']}
         
-        (Start speaking as the new persona now.)
+        (Adopt this new persona immediately.)
         """
+
+# --- 5. Entrypoint ---
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
@@ -135,21 +170,20 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
     await ctx.connect()
 
-    # Initialize Session with Default Voice (Matthew)
+    # Initialize Session with Dynamic TTS
+    dynamic_tts = DynamicMurfTTS(initial_voice="en-US-matthew")
+
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(voice="en-US-matthew", style="Conversation", text_pacing=True),
+        tts=dynamic_tts, 
         vad=ctx.proc.userdata["vad"],
     )
 
-    # Initialize Agent
+    # Pass session to agent so tools can access TTS
     agent = TutorAgent(session=session)
 
-    await session.start(
-        agent=agent,
-        room=ctx.room
-    )
+    await session.start(agent=agent, room=ctx.room)
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
