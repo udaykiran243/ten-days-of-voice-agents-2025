@@ -1,0 +1,27 @@
+{
+  "player": {
+    "hp": 45,
+    "max_hp": 100,
+    "ram": 20,
+    "max_ram": 100,
+    "status": "Wounded",
+    "inventory": [
+      "Cyberdeck MK.IV",
+      "Pistol",
+      "Data Shard (Encrypted)",
+      "Empty Stimpack"
+    ]
+  },
+  "world": {
+    "location": "Arasaka Server Room",
+    "danger_level": "EXTREME",
+    "weather": "Indoor / Artificial"
+  },
+  "log": [
+    "Hack Door | Roll: 18 vs DC15 | SUCCESS",
+    "Sneak past Guard | Roll: 4 vs DC12 | FAILURE",
+    "Guard shoots! Damage: 25. HP: 70 -> 45",
+    "Combat: Return Fire | Roll: 15 vs DC10 | SUCCESS",
+    "Loot Body: Found Data Shard"
+  ]
+}

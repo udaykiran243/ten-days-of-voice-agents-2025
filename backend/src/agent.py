@@ -1,9 +1,9 @@
 import logging
 import json
-import os
+import random
 import asyncio
-from datetime import datetime
-from typing import Annotated, List
+import os
+from typing import Annotated, Literal, List
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -17,265 +17,201 @@ from livekit.agents import (
     RunContext
 )
 from livekit.plugins import murf, deepgram, google, silero
+from livekit import rtc
 
 load_dotenv(".env.local")
-logger = logging.getLogger("grocery-agent")
+logger = logging.getLogger("game-master")
 
-# --- 1. CONFIG & DATA ---
+# --- CONFIGURATION ---
+# This ensures files are saved exactly where agent.py is located (backend/src)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CATALOG_FILE = os.path.join(SCRIPT_DIR, "grocery_catalog.json")
-ORDERS_FILE = os.path.join(SCRIPT_DIR, "orders.json")
 
-# Simple Recipe Map
-RECIPES = {
-    "sandwich": ["bread", "pb", "jam"],
-    "pasta": ["pasta", "sauce", "cheese"],
-    "breakfast": ["eggs", "bread", "milk", "banana"],
-    "fruit salad": ["apple", "banana"]
-}
-
-# --- 2. Logic Class ---
-class StoreManager:
+# --- 1. Game State Engine ---
+class GameState:
     def __init__(self):
-        self.catalog = []
-        self._load_catalog()
-        self._ensure_orders_file()
-
-    def _load_catalog(self):
-        if os.path.exists(CATALOG_FILE):
-            with open(CATALOG_FILE, "r") as f:
-                self.catalog = json.load(f)
-
-    def _ensure_orders_file(self):
-        if not os.path.exists(ORDERS_FILE):
-            with open(ORDERS_FILE, "w") as f:
-                json.dump([], f)
-
-    def get_item_by_name(self, name_query: str):
-        name_query = name_query.lower()
-        for item in self.catalog:
-            if item["id"] == name_query: return item
-        for item in self.catalog:
-            if name_query in item["name"].lower(): return item
-        return None
-
-    def save_order(self, cart_items: dict, total: float):
-        order_id = f"ORD-{int(datetime.now().timestamp())}"
-        order = {
-            "id": order_id,
-            "timestamp": datetime.now().isoformat(),
-            "items": cart_items,
-            "total": total,
-            "status": "received"
+        self.data = {
+            "player": {
+                "hp": 100,
+                "max_hp": 100,
+                "ram": 80, 
+                "max_ram": 100,
+                "status": "Healthy",
+                "inventory": ["Cyberdeck", "10mm Pistol", "Stimpack"]
+            },
+            "world": {
+                "location": "Neo-Veridia - Dumpster Behind Arasaka",
+                "danger_level": "Mildly Annoying",
+                "weather": "Acid Rain (Again)"
+            },
+            "log": [] 
         }
-        
-        try:
-            with open(ORDERS_FILE, "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = []
-            
-        data.append(order)
-        
-        with open(ORDERS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-        
-        return order_id
 
-    def update_mock_statuses(self):
-        try:
-            with open(ORDERS_FILE, "r") as f:
-                orders = json.load(f)
-            
-            now = datetime.now()
-            updated = False
-            
-            for order in orders:
-                order_time = datetime.fromisoformat(order["timestamp"])
-                elapsed = (now - order_time).total_seconds()
-                
-                new_status = order["status"]
-                if elapsed > 90: new_status = "delivered"
-                elif elapsed > 60: new_status = "out_for_delivery"
-                elif elapsed > 30: new_status = "being_prepared"
-                
-                if new_status != order["status"]:
-                    order["status"] = new_status
-                    updated = True
-            
-            if updated:
-                with open(ORDERS_FILE, "w") as f:
-                    json.dump(orders, f, indent=2)
-            
-            return orders
-        except Exception as e:
-            logger.error(f"Error updating statuses: {e}")
-            return []
+    def load_from_json(self, json_data: dict):
+        self.data = json_data
 
-# --- 3. The Agent ---
-class GroceryAgent(Agent):
-    def __init__(self):
+    def update_stats(self, hp_delta: int = 0, ram_delta: int = 0):
+        p = self.data["player"]
+        p["hp"] = max(0, min(p["max_hp"], p["hp"] + hp_delta))
+        p["ram"] = max(0, min(p["max_ram"], p["ram"] + ram_delta))
+        
+        if p["hp"] <= 0: p["status"] = "FLATLINED"
+        elif p["hp"] < 40: p["status"] = "Not Great"
+        elif p["hp"] < 80: p["status"] = "Bruised"
+        else: p["status"] = "Healthy"
+
+    def modify_inventory(self, item: str, action: str):
+        inv = self.data["player"]["inventory"]
+        if action == "add":
+            inv.append(item)
+        elif action == "remove" and item in inv:
+            inv.remove(item)
+
+    def add_log(self, message: str):
+        self.data["log"].append(message)
+        if len(self.data["log"]) > 5:
+            self.data["log"].pop(0)
+
+    def to_json(self):
+        return json.dumps(self.data)
+
+# --- 2. The Game Master Agent ---
+class GameMaster(Agent):
+    def __init__(self, room):
         super().__init__(
             instructions="""
-            You are 'FreshBot', a friendly grocery ordering assistant.
+            You are 'The Glitch', a chaotic and humorous Game Master for a Cyberpunk RPG.
             
-            STARTUP INSTRUCTION:
-            - When the conversation begins, immediately GREET the user and ask "What groceries do you need today?"
+            SETTING:
+            - Neo-Veridia City (it smells like ozone and cheap noodles).
+            - Player is a "Runner" (a mercenary hacker trying to look cool).
+            - Mission: Break into Arasaka Tower without tripping over your own feet.
             
-            CAPABILITIES:
-            1. **Take Orders:** Add items to the user's cart using `add_to_cart`. 
-               - If they ask for "ingredients for pasta/sandwich", use `add_recipe_ingredients`.
-            2. **Manage Cart:** Remove items using `remove_from_cart` or show the cart total using `view_cart`.
-            3. **Place Order:** When the user is done, summarize the total and call `place_order`.
-            4. **Tracking:** If the user asks "Where is my order?", use `track_orders`.
+            MECHANICS:
+            Action Resolution: Call `perform_check` for risky actions.
+            Inventory: Call `manage_inventory` for items.
             
-            BEHAVIOR:
-            - If an item isn't found, suggest something similar.
-            - Always confirm price when adding items.
+            STYLE:
+            - Tone: Humorous, Sarcastic, Witty.
+            - Poke fun at the player if they roll low (e.g., "Nice try, hero.").
+            - Celebrate high rolls with over-the-top enthusiasm (e.g., "YOU ARE A GOD OF THE NET!").
+            - Break the fourth wall slightly.
+            - KEEP IT FAST. Describe the scene, then ask "What do you do?"
             """
         )
-        self.store = StoreManager()
-        self.cart = {}
+        self.game = GameState()
+        self.room = room
+
+    async def sync_ui(self):
+        try:
+            await self.room.local_participant.publish_data(
+                self.game.to_json(),
+                topic="game_state_update"
+            )
+        except Exception as e:
+            logger.warning(f"UI Sync failed: {e}")
 
     @function_tool
-    async def get_catalog_items(self, ctx: RunContext):
-        """List available items in the store."""
-        return json.dumps(self.store.catalog)
-
-    @function_tool
-    async def add_to_cart(
+    async def perform_check(
         self, 
         ctx: RunContext, 
-        item_name: Annotated[str, "Name of the item"], 
-        quantity: Annotated[int, "Quantity"] = 1
+        action: Annotated[str, "Description"],
+        difficulty: Annotated[int, "DC"] = 12,
+        risk_damage: Annotated[int, "Damage if fail"] = 0
     ):
-        """Add a specific item to the cart."""
-        item = self.store.get_item_by_name(item_name)
-        if not item:
-            return f"Sorry, we don't have '{item_name}'."
+        roll = random.randint(1, 20)
+        outcome = "FAILURE"
+        damage_taken = 0
         
-        current_qty = self.cart.get(item["id"], 0)
-        self.cart[item["id"]] = current_qty + quantity
-        return f"Added {quantity}x {item['name']} to cart."
-
-    @function_tool
-    async def remove_from_cart(
-        self, 
-        ctx: RunContext, 
-        item_name: Annotated[str, "Name of the item to remove"], 
-        quantity: Annotated[int, "Quantity to remove (0 to remove all)"] = 0
-    ):
-        """Remove a specific item from the cart."""
-        item = self.store.get_item_by_name(item_name)
-        if not item:
-            return f"Could not find '{item_name}' in catalog."
-        
-        if item["id"] not in self.cart:
-            return f"'{item['name']}' is not in your cart."
-            
-        current_qty = self.cart[item["id"]]
-        
-        if quantity <= 0 or quantity >= current_qty:
-            # Remove the item entirely
-            del self.cart[item["id"]]
-            return f"Removed all {item['name']} from your cart."
+        if roll == 20:
+            outcome = "CRITICAL SUCCESS"
+            self.game.update_stats(ram_change=10)
+        elif roll >= difficulty:
+            outcome = "SUCCESS"
+        elif roll == 1:
+            outcome = "CRITICAL FAILURE"
+            damage_taken = risk_damage * 2
         else:
-            # Decrease quantity
-            self.cart[item["id"]] = current_qty - quantity
-            return f"Removed {quantity}x {item['name']}. You have {self.cart[item['id']]} left."
+            outcome = "FAILURE"
+            damage_taken = risk_damage
+
+        if damage_taken > 0:
+            self.game.update_stats(hp_delta=-damage_taken)
+        
+        log_msg = f"{action} | Roll: {roll} vs DC{difficulty} | {outcome}"
+        self.game.add_log(log_msg)
+        await self.sync_ui()
+        
+        # The prompt here encourages the LLM to be funny about the result
+        return f"Result: {outcome} (Roll {roll}). Damage Taken: {damage_taken}. Current HP: {self.game.data['player']['hp']}. Narrate this with humor/sarcasm."
 
     @function_tool
-    async def add_recipe_ingredients(
+    async def manage_inventory(
         self,
         ctx: RunContext,
-        recipe_name: Annotated[str, "Name of the dish (sandwich, pasta, breakfast)"]
+        item: Annotated[str, "Item name"],
+        action: Annotated[Literal["add", "remove"], "Action"]
     ):
-        """Intelligently adds all ingredients for a specific recipe/dish."""
-        recipe_key = next((k for k in RECIPES if k in recipe_name.lower()), None)
-        if not recipe_key:
-            return f"I don't have a pre-set bundle for '{recipe_name}'."
-        
-        added_items = []
-        for item_id in RECIPES[recipe_key]:
-            self.cart[item_id] = self.cart.get(item_id, 0) + 1
-            item_details = next((i for i in self.store.catalog if i["id"] == item_id), None)
-            if item_details: added_items.append(item_details["name"])
-            
-        return f"Added ingredients for {recipe_name} ({', '.join(added_items)})."
+        self.game.modify_inventory(item, action)
+        self.game.add_log(f"Inventory: {action.upper()} {item}")
+        await self.sync_ui()
+        return f"Inventory updated: {self.game.data['player']['inventory']}"
 
-    @function_tool
-    async def view_cart(self, ctx: RunContext):
-        """Check what is currently in the cart and the total price."""
-        if not self.cart:
-            return "Cart is empty."
-        
-        summary = []
-        total = 0.0
-        for item_id, qty in self.cart.items():
-            item = next((i for i in self.store.catalog if i["id"] == item_id), None)
-            if item:
-                cost = item["price"] * qty
-                total += cost
-                summary.append(f"{qty}x {item['name']} (${cost:.2f})")
-        
-        return f"Cart: {', '.join(summary)}. Total: ${total:.2f}"
-
-    @function_tool
-    async def place_order(self, ctx: RunContext):
-        """Finalize the order and save it."""
-        if not self.cart:
-            return "Cart is empty. Cannot place order."
-        
-        total = 0.0
-        for item_id, qty in self.cart.items():
-            item = next((i for i in self.store.catalog if i["id"] == item_id), None)
-            if item: total += item["price"] * qty
-            
-        order_id = self.store.save_order(self.cart, total)
-        self.cart = {}
-        return f"Order placed! ID: {order_id}. Total: ${total:.2f}. Status: Received."
-
-    @function_tool
-    async def track_orders(self, ctx: RunContext):
-        """Check status of recent orders."""
-        orders = self.store.update_mock_statuses()
-        if not orders: return "No order history found."
-        
-        recent = orders[-3:]
-        details = []
-        for o in recent:
-            details.append(f"Order {o['id']}: {o['status']} (Total ${o['total']})")
-        return "\n".join(details)
-
-# --- 4. Entrypoint ---
+# --- 3. Entrypoint ---
 
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    try:
+        proc.userdata["vad"] = silero.VAD.load()
+    except:
+        proc.userdata["vad"] = silero.VAD.load(use_onnx=False)
 
 async def entrypoint(ctx: JobContext):
-    try:
-        ctx.log_context_fields = {"room": ctx.room.name}
-        await ctx.connect()
+    ctx.log_context_fields = {"room": ctx.room.name}
+    await ctx.connect()
 
-        session = AgentSession(
-            stt=deepgram.STT(model="nova-3"),
-            llm=google.LLM(model="gemini-2.5-flash"),
-            tts=murf.TTS(
-                voice="en-US-matthew", 
-                style="Conversation",
-                text_pacing=True
-            ),
-            vad=ctx.proc.userdata["vad"],
-        )
+    vad = ctx.proc.userdata["vad"]
+    session = AgentSession(
+        stt=deepgram.STT(model="nova-3"),
+        llm=google.LLM(model="gemini-2.5-flash"),
+        tts=murf.TTS(
+            voice="en-US-natalie", # Reverted to Matthew as a safe fallback for unavailable voices
+            style="Promo",       # Energetic style
+            text_pacing=True
+        ),
+        vad=vad,
+    )
 
-        agent = GroceryAgent()
-        await session.start(agent=agent, room=ctx.room)
-        
-        # Greet the user automatically
-        await session.say("Hi! Welcome to FreshBot. I can help you order groceries. What do you need today?", allow_interruptions=True)
+    agent = GameMaster(room=ctx.room)
+    
+    # --- DATA PACKET HANDLER ---
+    @ctx.room.on("data_received")
+    def on_data_received(data: rtc.DataPacket):
+        try:
+            payload = json.loads(data.data.decode('utf-8'))
+            
+            if payload.get("type") == "SAVE_REQ":
+                save_path = os.path.join(SCRIPT_DIR, "savegame.json")
+                logger.info(f"Saving game state to: {save_path}")
+                
+                with open(save_path, "w") as f:
+                    json.dump(agent.game.data, f, indent=2)
+                
+                msg = json.dumps({"type": "SYSTEM_MSG", "message": f"Game saved to {save_path}"})
+                asyncio.create_task(ctx.room.local_participant.publish_data(msg, topic="system"))
+                
+            elif payload.get("type") == "LOAD_REQ":
+                new_state = payload.get("state")
+                if new_state:
+                    agent.game.load_from_json(new_state)
+                    agent.game.add_log("SYSTEM: GAME LOADED.")
+                    asyncio.create_task(agent.sync_ui())
+                    asyncio.create_task(session.say("Whoa, déjà vu. Reloading reality... okay, where were we?", allow_interruptions=True))
 
-    except Exception as e:
-        logger.error(f"CRITICAL ERROR: {e}")
+        except Exception as e:
+            logger.error(f"Data error: {e}")
+
+    await session.start(agent=agent, room=ctx.room)
+    await agent.sync_ui()
+    await session.say("System online. Welcome to Neo-Veridia, chummer. It's raining acid, your rent is due, and you're standing outside Arasaka Tower. Don't mess this up. What do you do?", allow_interruptions=True)
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
