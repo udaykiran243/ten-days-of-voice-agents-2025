@@ -1,0 +1,122 @@
+[
+  {
+    "id": "prod_hoodie_blk",
+    "name": "Stealth Black Hoodie",
+    "description": "Premium cotton blend, perfect for late night coding.",
+    "price": 1200,
+    "currency": "INR",
+    "category": "Apparel",
+    "image": "👕",
+    "stock": 50
+  },
+  {
+    "id": "prod_tee_wht",
+    "name": "Classic White Tee",
+    "description": "100% Organic Cotton, breathable and soft.",
+    "price": 500,
+    "currency": "INR",
+    "category": "Apparel",
+    "image": "👕",
+    "stock": 100
+  },
+  {
+    "id": "prod_mug_dev",
+    "name": "Developer Coffee Mug",
+    "description": "Matte black ceramic mug with 'It works on my machine' print.",
+    "price": 350,
+    "currency": "INR",
+    "category": "Accessories",
+    "image": "☕",
+    "stock": 25
+  },
+  {
+    "id": "prod_cap_blue",
+    "name": "Azure Baseball Cap",
+    "description": "Adjustable fit, durable fabric, vibrant blue.",
+    "price": 450,
+    "currency": "INR",
+    "category": "Accessories",
+    "image": "🧢",
+    "stock": 15
+  },
+  {
+    "id": "prod_stickers",
+    "name": "Laptop Sticker Pack",
+    "description": "Assorted tech logos and memes for your battlestation.",
+    "price": 150,
+    "currency": "INR",
+    "category": "Stationery",
+    "image": "💻",
+    "stock": 200
+  },
+  {
+    "id": "prod_mousepad",
+    "name": "RGB Gaming Mousepad",
+    "description": "Extra large, anti-slip rubber base with customizable lighting.",
+    "price": 899,
+    "currency": "INR",
+    "category": "Electronics",
+    "image": "🖱️",
+    "stock": 40
+  },
+  {
+    "id": "prod_headphones",
+    "name": "Noise Cancelling Headphones",
+    "description": "Wireless over-ear headphones with 30-hour battery life.",
+    "price": 4500,
+    "currency": "INR",
+    "category": "Electronics",
+    "image": "🎧",
+    "stock": 10
+  },
+  {
+    "id": "prod_sneakers",
+    "name": "Retro High-Top Sneakers",
+    "description": "Vintage style with modern comfort soles.",
+    "price": 2500,
+    "currency": "INR",
+    "category": "Footwear",
+    "image": "👟",
+    "stock": 20
+  },
+  {
+    "id": "prod_backpack",
+    "name": "Tech Commuter Backpack",
+    "description": "Water-resistant, padded laptop compartment, USB charging port.",
+    "price": 1800,
+    "currency": "INR",
+    "category": "Accessories",
+    "image": "🎒",
+    "stock": 30
+  },
+  {
+    "id": "prod_notebook",
+    "name": "Hardcover Dot Grid Notebook",
+    "description": "180gsm paper, lay-flat binding, perfect for wireframing.",
+    "price": 400,
+    "currency": "INR",
+    "category": "Stationery",
+    "image": "📓",
+    "stock": 150
+  },
+  {
+    "id": "prod_bottle",
+    "name": "Insulated Water Bottle",
+    "description": "Keeps drinks cold for 24 hours, hot for 12.",
+    "price": 650,
+    "currency": "INR",
+    "category": "Accessories",
+    "image": "🧊",
+    "stock": 60
+  },
+  {
+    "id": "prod_desk_lamp",
+    "name": "Minimalist LED Desk Lamp",
+    "description": "Adjustable brightness and color temperature with touch control.",
+    "price": 1200,
+    "currency": "INR",
+    "category": "Electronics",
+    "image": "💡",
+    "stock": 25
+  }
+]

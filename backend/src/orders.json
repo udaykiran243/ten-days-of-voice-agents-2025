@@ -1,0 +1,43 @@
+[
+  {
+    "id": "ORD-1764433860",
+    "created_at": "2025-11-29T22:01:00.491664",
+    "status": "CONFIRMED",
+    "items": [
+      {
+        "id": "prod_hoodie_blk",
+        "name": "Stealth Black Hoodie",
+        "qty": 2,
+        "price": 1200,
+        "total": 2400,
+        "currency": "INR"
+      },
+      {
+        "id": "prod_mousepad",
+        "name": "RGB Gaming Mousepad",
+        "qty": 1,
+        "price": 899,
+        "total": 899,
+        "currency": "INR"
+      },
+      {
+        "id": "prod_backpack",
+        "name": "Tech Commuter Backpack",
+        "qty": 1,
+        "price": 1800,
+        "total": 1800,
+        "currency": "INR"
+      },
+      {
+        "id": "prod_headphones",
+        "name": "Noise Cancelling Headphones",
+        "qty": 1,
+        "price": 4500,
+        "total": 4500,
+        "currency": "INR"
+      }
+    ],
+    "total_amount": 9599,
+    "currency": "INR"
+  }
+]

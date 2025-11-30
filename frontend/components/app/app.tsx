@@ -3,261 +3,186 @@
 import { 
   RoomAudioRenderer, 
   StartAudio, 
-  Chat,
-  useConnectionState,
   useDataChannel,
-  useRoomContext
+  useRoomContext,
+  useConnectionState,
+  Chat
 } from '@livekit/components-react';
 import { ConnectionState } from 'livekit-client';
 import type { AppConfig } from '@/app-config';
 import { SessionProvider } from '@/components/app/session-provider';
 import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/livekit/toaster';
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 
 interface AppProps {
   appConfig: AppConfig;
 }
 
-// --- 1. Game State Hook ---
-const useGameState = () => {
-  const [state, setState] = useState({
-    player: {
-      hp: 100,
-      max_hp: 100,
-      ram: 80,
-      max_ram: 100,
-      status: "Healthy",
-      inventory: ["Cyberdeck", "Pistol"]
-    },
-    world: {
-      location: "Unknown",
-      danger_level: "Low"
-    },
-    log: [] as string[]
-  });
+// --- 1. Store State Hook ---
+const useStoreState = () => {
+  const [catalog, setCatalog] = useState<any[]>([]);
+  const [cart, setCart] = useState<any>({ items: [], grand_total: 0 });
+  const [lastOrder, setLastOrder] = useState<any>(null);
 
-  const room = useRoomContext();
+  useDataChannel((...args: any[]) => {
+    let payload: Uint8Array | undefined;
+    
+    // Handle new/old SDK signatures
+    if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'payload' in args[0]) {
+        payload = args[0].payload;
+    } else {
+        payload = args[0];
+    }
+    
+    if (!payload) return;
 
-  useDataChannel((payload, participant, topic) => {
-    // Handle older SDK version if payload is wrapped in an object
-    // @ts-ignore
-    const rawPayload = payload?.payload ?? payload; 
-
-    if (!rawPayload) return;
-
-    const text = new TextDecoder().decode(rawPayload);
     try {
-      const data = JSON.parse(text);
+      const text = new TextDecoder().decode(payload);
+      const msg = JSON.parse(text);
       
-      if (topic === "game_state_update") {
-        setState(data);
-      } 
-      else if (topic === "system" && data.type === "SAVE_ACK") {
-        console.log("Received save data, downloading...");
-        const blob = new Blob([JSON.stringify(data.state, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `cyberpunk_save_${new Date().getTime()}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+      if (msg.type === "CATALOG_INIT") setCatalog(msg.data);
+      if (msg.type === "CART_UPDATE") setCart(msg.data);
+      if (msg.type === "ORDER_PLACED") {
+          setLastOrder(msg.data);
+          setCart({ items: [], grand_total: 0 }); // Clear UI cart
       }
-    } catch (e) { console.error("Data Packet Error:", e); }
+    } catch (e) { console.error("Parse Error", e); }
   });
 
-  return { state, room };
+  return { catalog, cart, lastOrder };
 };
 
-// --- 2. Visual Components ---
+// --- 2. Components ---
 
-const CRTOverlay = () => (
-  <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden h-full w-full">
-    <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-50 bg-[length:100%_2px,3px_100%] pointer-events-none opacity-20" />
-    <div className="absolute inset-0 bg-black opacity-5 animate-pulse pointer-events-none" />
+const ProductCard = ({ item }: { item: any }) => (
+  <div className="bg-white p-4 rounded-lg shadow-md border border-gray-100 hover:shadow-lg transition-shadow flex flex-col">
+    <div className="h-24 bg-gray-50 rounded mb-3 flex items-center justify-center text-4xl">{item.image}</div>
+    <h3 className="font-bold text-gray-800 text-sm mb-1">{item.name}</h3>
+    <p className="text-xs text-gray-500 mb-3 flex-1">{item.description}</p>
+    <div className="flex justify-between items-center mt-auto">
+      <span className="font-bold text-indigo-600">₹{item.price}</span>
+      <span className="text-[10px] bg-gray-100 px-2 py-1 rounded text-gray-600 border border-gray-200">In Stock</span>
+    </div>
   </div>
 );
 
-const StatusPanel = ({ game }: any) => {
-  const hpPercent = (game.player.hp / game.player.max_hp) * 100;
-  const ramPct = (game.player.ram / game.player.max_ram) * 100;
-
-  return (
-    <div className="border-r border-cyan-900/50 bg-black/80 p-6 text-cyan-500 font-mono text-xs w-72 flex flex-col gap-8 hidden md:flex shadow-[0_0_15px_rgba(0,255,255,0.1)] relative z-10">
-      <div>
-        <h3 className="text-cyan-300 border-b border-cyan-700 mb-3 pb-1 tracking-[0.2em] font-bold">OPERATIVE STATUS</h3>
-        <div className="space-y-3">
-          <div className="flex justify-between">
-            <span>HP [{game.player.status.toUpperCase()}]</span> 
-            <span className={`${hpPercent < 40 ? 'text-red-500 animate-pulse' : 'text-green-400'} font-bold`}>{game.player.hp}%</span>
-          </div>
-          <div className="w-full bg-gray-900 h-1">
-            <div className={`h-1 transition-all duration-500 ${hpPercent < 40 ? 'bg-red-500 shadow-[0_0_10px_red]' : 'bg-green-500 shadow-[0_0_10px_lime]'}`} style={{ width: `${hpPercent}%` }} />
-          </div>
-          
-          <div className="flex justify-between"><span>RAM [CYBER]</span> <span className="text-yellow-400 font-bold">{game.player.ram}%</span></div>
-          <div className="w-full bg-gray-900 h-1">
-            <div className="bg-yellow-500 h-1 transition-all duration-500 shadow-[0_0_10px_yellow]" style={{ width: `${ramPct}%` }} />
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <h3 className="text-cyan-300 border-b border-cyan-700 mb-3 pb-1 tracking-[0.2em] font-bold">INVENTORY</h3>
-        <ul className="space-y-2 opacity-80 font-mono">
-          {game.player.inventory.map((item: string, i: number) => (
-             <li key={i} className="flex items-center gap-2"><span className="text-cyan-700">{'>'}</span> {item}</li>
-          ))}
-        </ul>
-      </div>
-      
-      <div className="mt-auto">
-        <h3 className="text-red-400 border-b border-red-900 mb-3 pb-1 tracking-[0.2em] font-bold">CURRENT LOCATION</h3>
-        <div className="border border-red-900/50 bg-red-950/10 p-3 rounded text-center">
-             <p className="text-red-500 animate-pulse font-bold text-sm">{game.world.location.toUpperCase()}</p>
-             <p className="text-red-800/60 text-[10px] mt-1">ALERT LEVEL: {game.world.danger_level.toUpperCase()}</p>
-        </div>
-      </div>
+const CartPanel = ({ cart }: { cart: any }) => (
+  <div className="bg-white p-4 rounded-lg border border-gray-200 h-full flex flex-col shadow-sm">
+    <h3 className="font-bold text-gray-700 border-b pb-3 mb-3 flex items-center gap-2">
+        🛒 Your Cart <span className="text-xs font-normal text-gray-400">({cart.items.length} items)</span>
+    </h3>
+    <div className="flex-1 overflow-y-auto space-y-3 pr-2">
+        {cart.items.length === 0 && (
+            <div className="text-center py-10 text-gray-400 text-sm">
+                Your cart is empty.
+                <br/>Ask the agent to add items!
+            </div>
+        )}
+        {cart.items.map((item: any, i: number) => (
+            <div key={i} className="flex justify-between text-sm text-gray-700 bg-gray-50 p-2 rounded border border-gray-100">
+                <div>
+                    <div className="font-medium">{item.name}</div>
+                    <div className="text-xs text-gray-500">Qty: {item.qty} x ₹{item.price}</div>
+                </div>
+                <div className="font-bold">₹{item.total}</div>
+            </div>
+        ))}
     </div>
-  );
-};
+    <div className="mt-auto pt-4 border-t border-gray-200">
+        <div className="flex justify-between font-bold text-gray-800 text-lg mb-2">
+            <span>Total</span>
+            <span>₹{cart.grand_total}</span>
+        </div>
+        <div className="text-xs text-center text-gray-400">Say "Checkout" to place order</div>
+    </div>
+  </div>
+);
 
-const ActionLog = ({ game }: any) => {
-    const recentLogs = game.log.slice(-3);
+const OrderReceipt = ({ order }: { order: any }) => {
+    if (!order) return null;
     return (
-        <div className="border border-cyan-800/50 p-4 rounded bg-cyan-950/10 flex-1 overflow-hidden flex flex-col">
-            <h4 className="text-xs mb-3 border-b border-cyan-800 pb-2 tracking-widest text-cyan-400">ACTION LOG</h4>
-            <div className="text-[10px] text-cyan-700/80 space-y-2 font-mono flex-1">
-                {recentLogs.map((log: string, i: number) => (
-                    <p key={i} className="animate-in fade-in slide-in-from-bottom-2 duration-500">{'>'} {log}</p>
-                ))}
-                <p className="mt-4 text-cyan-500 animate-pulse">{'>'} Awaiting input...</p>
+        <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-[100] backdrop-blur-sm animate-in fade-in">
+            <div className="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full transform scale-100 animate-in zoom-in duration-200 border border-gray-200">
+                <div className="text-center mb-6">
+                    <div className="w-14 h-14 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto text-3xl mb-3">✓</div>
+                    <h2 className="text-2xl font-bold text-gray-900">Order Placed!</h2>
+                    <p className="text-xs text-gray-500 mt-1 font-mono">ID: {order.id}</p>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100 mb-4">
+                    <div className="space-y-2">
+                        {order.items.map((item: any, i: number) => (
+                            <div key={i} className="flex justify-between text-sm text-gray-700">
+                                <span>{item.qty}x {item.name}</span>
+                                <span className="font-medium">₹{item.total}</span>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="border-t border-dashed border-gray-300 my-3"></div>
+                    <div className="flex justify-between font-bold text-lg text-gray-900">
+                        <span>Total Paid</span>
+                        <span>₹{order.total_amount}</span>
+                    </div>
+                </div>
+                <button onClick={() => window.location.reload()} className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold shadow-md transition-all active:scale-95">
+                    Start New Order
+                </button>
             </div>
         </div>
     );
 }
 
-// --- 3. Bottom Control Panel (New Component) ---
-const ControlPanel = ({ room }: any) => {
-  const state = useConnectionState();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleSave = async () => {
-    if (!room) return;
-    const payload = new TextEncoder().encode(JSON.stringify({ type: "SAVE_REQ" }));
-    await room.localParticipant.publishData(payload, { reliable: true });
-  };
-
-  const handleLoad = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file || !room) return;
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const content = JSON.parse(e.target?.result as string);
-        const payload = new TextEncoder().encode(JSON.stringify({ type: "LOAD_REQ", state: content }));
-        await room.localParticipant.publishData(payload, { reliable: true });
-      } catch (err) {
-        console.error("Invalid save file", err);
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  if (state !== ConnectionState.Connected) return null;
+const Storefront = () => {
+  const { catalog, cart, lastOrder } = useStoreState();
+  const  state  = useConnectionState();
 
   return (
-    <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 flex gap-4 z-[100] pointer-events-auto">
-        <button 
-          onClick={handleSave} 
-          className="px-4 py-2 text-xs font-bold bg-cyan-900/90 hover:bg-cyan-700 border border-cyan-500 shadow-[0_0_15px_rgba(0,255,255,0.3)] rounded text-cyan-300 transition-all active:scale-95 tracking-wider"
-        >
-          SAVE_STATE
-        </button>
-        <button 
-          onClick={() => fileInputRef.current?.click()} 
-          className="px-4 py-2 text-xs font-bold bg-yellow-900/90 hover:bg-yellow-700 border border-yellow-500 shadow-[0_0_15px_rgba(255,255,0,0.3)] rounded text-yellow-300 transition-all active:scale-95 tracking-wider"
-        >
-          LOAD_STATE
-        </button>
-        <input 
-          type="file" 
-          ref={fileInputRef} 
-          className="hidden" 
-          accept=".json" 
-          onChange={handleLoad} 
-        />
-    </div>
-  );
-};
+    <div className="flex h-full w-full bg-gray-50 text-gray-900 relative overflow-hidden font-sans">
+       {/* Order Modal */}
+       <OrderReceipt order={lastOrder} />
 
-// --- 4. Header ---
-const CyberHeader = () => {
-  const state = useConnectionState();
-  return (
-    <header className="border-b border-cyan-900/50 bg-black/90 p-4 px-6 flex justify-between items-center text-cyan-500 font-mono shadow-lg relative z-[100]">
-      <div className="flex items-center gap-3">
-          <div className="w-3 h-3 bg-cyan-500 rounded-full animate-ping"></div>
-          <div className="text-xl font-bold tracking-[0.15em] text-cyan-100 drop-shadow-[0_0_10px_rgba(0,255,255,0.8)]">
-            NEO-VERIDIA <span className="text-cyan-700">//</span> NET.LINK
+       {/* Left: Catalog */}
+       <div className="flex-1 p-6 md:p-8 overflow-y-auto flex flex-col">
+          <header className="mb-8 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+             <div className="flex items-center gap-3">
+                <div className="bg-indigo-600 text-white p-2 rounded-lg font-bold text-xl">🛍️</div>
+                <div>
+                    <h1 className="text-xl font-bold text-gray-900">Agentic Store</h1>
+                    <div className="text-xs text-gray-500">Voice-Powered Shopping</div>
+                </div>
+             </div>
+             <div className={`px-4 py-1.5 rounded-full text-xs font-bold tracking-wide border ${state === ConnectionState.Connected ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                {state === ConnectionState.Connected ? '● AGENT ONLINE' : '○ CONNECTING...'}
+             </div>
+          </header>
+          
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+             {catalog.length === 0 && state === ConnectionState.Connected && (
+                 <div className="col-span-full flex flex-col items-center justify-center py-20 text-gray-400">
+                    <div className="animate-spin text-3xl mb-4">⏳</div>
+                    <p>Loading catalog from Agent...</p>
+                 </div>
+             )}
+             {catalog.map((item) => (
+                 <ProductCard key={item.id} item={item} />
+             ))}
           </div>
-      </div>
-      <div className="flex items-center gap-4 text-xs border border-cyan-900/50 px-3 py-1 rounded bg-cyan-950/20">
-          <span className="opacity-50">LINK STATUS:</span>
-          <span className={`${state === ConnectionState.Connected ? 'text-green-400' : 'text-red-500'} font-bold tracking-wider`}>
-            {state === ConnectionState.Connected ? 'SECURE' : `${state}`.toUpperCase()}
-          </span>
-      </div>
-    </header>
-  );
-};
+       </div>
 
-// --- 5. Main Dashboard ---
-const GameDashboard = () => {
-  const { state, room } = useGameState();
+       {/* Right: Sidebar */}
+       <div className="w-96 bg-white border-l border-gray-200 flex flex-col shadow-xl z-10">
+          {/* Top: Visualizer */}
+          <div className="h-56 bg-slate-900 relative overflow-hidden flex items-center justify-center border-b border-gray-800">
+              <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-500 via-slate-900 to-black"></div>
+              <div className="z-10 w-full h-full opacity-80"><ViewController /></div>
+              <div className="absolute bottom-3 left-4 text-xs text-indigo-300 font-mono tracking-widest">VOICE_INTERFACE_ACTIVE</div>
+          </div>
 
-  return (
-    <div className="flex flex-col h-full w-full absolute inset-0 z-10 pointer-events-auto">
-      <CyberHeader />
-      
-      <div className="flex flex-1 overflow-hidden relative">
-        {/* Left Panel */}
-        <StatusPanel game={state} />
-
-        {/* Center Terminal */}
-        <div className="flex-1 flex flex-col bg-stone-950 relative p-4 md:p-8">
-             <div className="absolute inset-0 bg-[linear-gradient(rgba(0,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(0,255,255,0.03)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
-             <div className="flex-1 overflow-hidden rounded-lg border border-cyan-800/50 bg-black/80 shadow-[0_0_30px_rgba(0,0,0,0.8)] relative">
-                <div className="absolute top-0 left-0 right-0 bg-cyan-950/30 border-b border-cyan-900/50 p-1 px-2 text-[10px] text-cyan-600 tracking-widest">
-                    TERMINAL_OUTPUT_LOG_V.0.9.2
-                </div>
-                <div className="h-full pt-6">
-                    <Chat style={{ height: '100%', background: 'transparent', fontFamily: 'monospace' }} />
-                </div>
-             </div>
-        </div>
-
-        {/* Right Panel */}
-        <div className="w-80 border-l border-cyan-900/50 bg-black/80 p-4 flex flex-col gap-4 hidden lg:flex shadow-[-10px_0_20px_rgba(0,0,0,0.5)]">
-             <div className="h-64 border border-cyan-700/50 bg-black rounded-lg relative overflow-hidden shadow-[0_0_15px_rgba(0,255,255,0.1)]">
-                <div className="absolute top-2 left-2 text-[10px] text-cyan-600 tracking-widest z-10">GM_AUDIO_STREAM</div>
-                <div className="absolute bottom-2 right-2 text-[10px] text-red-500 animate-pulse z-10">● LIVE</div>
-                <ViewController />
-             </div>
-             <ActionLog game={state} />
-        </div>
-      </div>
-      
-      {/* Bottom Controls */}
-      <ControlPanel room={room} />
-
-      {/* Mobile Fab */}
-      <div className="lg:hidden absolute bottom-24 right-4 w-32 h-32 z-50 border border-cyan-500/50 rounded-full overflow-hidden bg-black/90 shadow-[0_0_20px_rgba(0,255,255,0.3)]">
-        <ViewController />
-      </div>
+          {/* Bottom: Cart */}
+          <div className="flex-1 p-6 overflow-hidden bg-gray-50">
+              <CartPanel cart={cart} />
+          </div>
+       </div>
     </div>
   );
 };
@@ -265,13 +190,10 @@ const GameDashboard = () => {
 export function App({ appConfig }: AppProps) {
   return (
     <SessionProvider appConfig={appConfig}>
-      <div className="relative h-svh bg-black overflow-hidden">
-        <div className="absolute inset-0 bg-[linear-gradient(rgba(0,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(0,255,255,0.03)_1px,transparent_1px)] bg-[size:40px_40px]"></div>
-        <CRTOverlay />
-        <GameDashboard />
+      <div className="h-svh w-full bg-gray-50">
+        <Storefront />
       </div>
-
-      <StartAudio label="JACK IN" />
+      <StartAudio label="START SHOPPING" />
       <RoomAudioRenderer />
       <Toaster />
     </SessionProvider>
